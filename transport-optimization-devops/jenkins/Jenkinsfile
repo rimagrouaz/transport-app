@@ -78,7 +78,7 @@ pipeline {
                             k set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
                             
                             echo "✅ Vérification du statut..."
-                            k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
+                            k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=5m
                         '''
                     }
                 }
