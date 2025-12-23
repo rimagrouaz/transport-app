@@ -3,7 +3,6 @@ pipeline {
 
     environment {
         APP_NAME = 'transport-app'
-        // Version basée sur le numéro du build Jenkins
         APP_VERSION = "v${env.BUILD_NUMBER}"
         KUBE_NAMESPACE = 'transport'
     }
@@ -29,7 +28,6 @@ pipeline {
                     sh '''
                         python -m pip install --upgrade pip
                         pip install -r requirements.txt pytest
-                        # On exécute les tests, le pipeline continue même si aucun test n'est trouvé
                         python -m pytest tests/ || echo "⚠️ Aucun test trouvé ou échec des tests."
                     '''
                 }
@@ -40,7 +38,6 @@ pipeline {
             steps {
                 echo "🏗️ Construction de l'image Docker : ${APP_NAME}:${APP_VERSION}"
                 dir('transport-optimization-devops') {
-                    // Utilisation de guillemets doubles pour que Jenkins remplace les variables
                     sh "docker build -t ${APP_NAME}:${APP_VERSION} -f docker/Dockerfile ."
                 }
             }
@@ -50,7 +47,6 @@ pipeline {
             agent {
                 docker {
                     image 'bitnami/kubectl:latest'
-                    // Entrypoint vide pour laisser Jenkins exécuter ses scripts
                     args '-u root --entrypoint='
                 }
             }
@@ -59,12 +55,18 @@ pipeline {
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
                     dir('transport-optimization-devops') {
                         sh '''
-                            export KUBECONFIG=${KUBECFG}
+                            # On copie le fichier pour pouvoir le modifier
+                            cp ${KUBECFG} ./kubeconfig_tmp
+                            export KUBECONFIG=./kubeconfig_tmp
+                            
+                            echo "Network fix: Pointing 127.0.0.1 to host.docker.internal"
+                            # Cette ligne remplace l'IP locale par l'adresse de ton Windows
+                            sed -i 's/127.0.0.1/host.docker.internal/g' ./kubeconfig_tmp
                             
                             echo "🔍 Vérification de la connexion au cluster..."
                             kubectl cluster-info
                             
-                            echo "📁 Création du namespace ${KUBE_NAMESPACE} si nécessaire..."
+                            echo "📁 Création du namespace ${KUBE_NAMESPACE}..."
                             kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
                             
                             echo "🚀 Application des manifestes YAML..."
@@ -74,7 +76,7 @@ pipeline {
                             echo "🔄 Mise à jour de l'image vers ${APP_NAME}:${APP_VERSION}..."
                             kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
                             
-                            echo "✅ Vérification du statut du déploiement..."
+                            echo "✅ Vérification du statut..."
                             kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
                         '''
                     }
@@ -84,17 +86,10 @@ pipeline {
     }
 
     post {
-        success {
-            echo '✅ ✅ ✅ PIPELINE TERMINÉ AVEC SUCCÈS ! ✅ ✅ ✅'
-            echo "L'application est disponible dans le namespace : ${KUBE_NAMESPACE}"
-        }
-        failure {
-            echo '❌ ❌ ❌ LE PIPELINE A ÉCHOUÉ ! ❌ ❌ ❌'
-            echo 'Vérifiez les logs de la console pour diagnostiquer le problème.'
-        }
+        success { echo '✅ ✅ ✅ PIPELINE TERMINÉ AVEC SUCCÈS ! ✅ ✅ ✅' }
+        failure { echo '❌ ❌ ❌ LE PIPELINE A ÉCHOUÉ ! ❌ ❌ ❌' }
         always {
-            echo '🧹 Nettoyage des images Docker...'
-            // On nettoie les images inutilisées pour éviter de saturer le disque
+            echo '🧹 Nettoyage...'
             sh 'docker image prune -f || true'
         }
     }
