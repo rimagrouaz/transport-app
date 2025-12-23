@@ -53,7 +53,7 @@ pipeline {
             steps {
                 echo '🚀 Déploiement vers le cluster Kubernetes...'
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
-                    dir('transport-optimization-devops') {
+                    dir('kubernetes') {
                         sh '''
                             cp ${KUBECFG} ./kubeconfig_tmp
                             export KUBECONFIG=./kubeconfig_tmp
