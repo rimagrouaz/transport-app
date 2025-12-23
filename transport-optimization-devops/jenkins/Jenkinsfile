@@ -90,12 +90,6 @@ pipeline {
         }
         
         stage('🐳 Build Docker Image') {
-            agent { 
-                docker { 
-                    image 'python:3.9-slim'
-                    args '-u root'
-                } 
-            }
             steps {
                 script {
                     echo "Building Docker image..."
@@ -133,7 +127,7 @@ pipeline {
         
         stage('📤 Push to Registry') {
             when {
-                branch 'main'
+                branch 'master'
             }
             steps {
                 script {
