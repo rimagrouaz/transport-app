@@ -1,0 +1,184 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_IMAGE = 'rimagrouaz/transport-app'
+        DOCKER_TAG = "${env.BUILD_NUMBER}"
+        DOCKER_REGISTRY = 'docker.io'
+        KUBE_NAMESPACE = 'default'
+        APP_NAME = 'transport-app'
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    
+    stages {
+        stage('🔍 Checkout') {
+            steps {
+                script {
+                    echo "Checking out code from repository..."
+                }
+                checkout scm
+                sh 'git rev-parse --short HEAD > .git/commit-id'
+            }
+        }
+        
+        stage('📦 Install Dependencies') {
+            steps {
+                script {
+                    echo "Installing Python dependencies..."
+                }
+                sh '''
+                    cd app
+                    pip install --user -r requirements.txt
+                '''
+            }
+        }
+        
+        stage('🧪 Run Tests') {
+            steps {
+                script {
+                    echo "Running unit tests..."
+                }
+                sh '''
+                    cd tests
+                    python -m pytest test_app.py -v --junitxml=test-results.xml --cov=app --cov-report=xml
+                '''
+            }
+            post {
+                always {
+                    junit 'tests/test-results.xml'
+                }
+            }
+        }
+        
+        stage('🔐 Security Scan - Code') {
+            steps {
+                script {
+                    echo "Running security scan on code..."
+                }
+                sh '''
+                    # Install safety for dependency checking
+                    pip install --user safety
+                    cd app
+                    safety check --json || true
+                '''
+            }
+        }
+        
+        stage('🐳 Build Docker Image') {
+            steps {
+                script {
+                    echo "Building Docker image..."
+                }
+                sh '''
+                    cd docker
+                    docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} -t ${DOCKER_IMAGE}:latest -f Dockerfile ../app
+                '''
+            }
+        }
+        
+        stage('🔒 Security Scan - Image') {
+            steps {
+                script {
+                    echo "Scanning Docker image for vulnerabilities..."
+                }
+                sh '''
+                    # Install Trivy if not available
+                    which trivy || {
+                        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+                        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+                        sudo apt-get update && sudo apt-get install trivy
+                    }
+                    
+                    trivy image --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${DOCKER_TAG} || true
+                '''
+            }
+        }
+        
+        stage('📤 Push to Registry') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Pushing Docker image to registry..."
+                }
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin ${DOCKER_REGISTRY}
+                        docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        docker push ${DOCKER_IMAGE}:latest
+                        docker logout ${DOCKER_REGISTRY}
+                    '''
+                }
+            }
+        }
+        
+        stage('🚀 Deploy to Kubernetes') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Deploying to Kubernetes..."
+                }
+                withKubeConfig([credentialsId: 'kubeconfig-credentials']) {
+                    sh '''
+                        # Update image in deployment
+                        kubectl set image deployment/${APP_NAME} ${APP_NAME}=${DOCKER_IMAGE}:${DOCKER_TAG} -n ${KUBE_NAMESPACE}
+                        
+                        # Wait for rollout to complete
+                        kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=5m
+                        
+                        # Verify deployment
+                        kubectl get pods -n ${KUBE_NAMESPACE} -l app=${APP_NAME}
+                    '''
+                }
+            }
+        }
+        
+        stage('✅ Smoke Tests') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Running smoke tests..."
+                }
+                sh '''
+                    # Get service URL
+                    SERVICE_IP=$(kubectl get svc ${APP_NAME}-service -n ${KUBE_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                    
+                    if [ -z "$SERVICE_IP" ]; then
+                        SERVICE_IP="localhost:30080"
+                    fi
+                    
+                    # Test health endpoint
+                    curl -f http://${SERVICE_IP}/health || exit 1
+                    
+                    echo "Smoke tests passed!"
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ Pipeline completed successfully!'
+            // Send notification (email, Slack, etc.)
+        }
+        failure {
+            echo '❌ Pipeline failed!'
+            // Send failure notification
+        }
+        always {
+            // Clean up
+            sh 'docker system prune -f || true'
+            cleanWs()
+        }
+    }
+}

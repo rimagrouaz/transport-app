@@ -1,0 +1,164 @@
+---
+- name: Setup Development Environment for Transport Optimization
+  hosts: local
+  become: yes
+  vars:
+    minikube_version: "latest"
+    kubectl_version: "stable"
+  
+  tasks:
+    - name: 📋 Display setup information
+      debug:
+        msg:
+          - "========================================="
+          - "🚀 Starting environment setup..."
+          - "========================================="
+    
+    - name: 🔄 Update apt cache
+      apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+    
+    - name: 📦 Install required system packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-pip
+          - git
+        state: present
+      when: ansible_os_family == "Debian"
+    
+    - name: 🐳 Check if Docker is installed
+      command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+    
+    - name: 🐳 Install Docker
+      block:
+        - name: Download Docker installation script
+          get_url:
+            url: https://get.docker.com
+            dest: /tmp/get-docker.sh
+            mode: '0755'
+        
+        - name: Run Docker installation script
+          command: sh /tmp/get-docker.sh
+          args:
+            creates: /usr/bin/docker
+        
+        - name: Add user to docker group
+          user:
+            name: "{{ ansible_user_id }}"
+            groups: docker
+            append: yes
+      when: docker_check.rc != 0
+    
+    - name: 🎯 Check if kubectl is installed
+      command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+    
+    - name: 🎯 Install kubectl
+      block:
+        - name: Download kubectl
+          get_url:
+            url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+            dest: /usr/local/bin/kubectl
+            mode: '0755'
+        
+        - name: Verify kubectl installation
+          command: kubectl version --client
+          changed_when: false
+      when: kubectl_check.rc != 0
+    
+    - name: 🎮 Check if Minikube is installed
+      command: minikube version
+      register: minikube_check
+      changed_when: false
+      failed_when: false
+    
+    - name: 🎮 Install Minikube
+      block:
+        - name: Download Minikube
+          get_url:
+            url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+            dest: /usr/local/bin/minikube
+            mode: '0755'
+        
+        - name: Verify Minikube installation
+          command: minikube version
+          changed_when: false
+      when: minikube_check.rc != 0
+    
+    - name: 🐍 Install Python packages
+      pip:
+        name:
+          - kubernetes
+          - openshift
+          - docker
+          - pyyaml
+        state: present
+        executable: pip3
+    
+    - name: 🎮 Check if Minikube is running
+      command: minikube status
+      register: minikube_status
+      changed_when: false
+      failed_when: false
+      become: no
+    
+    - name: 🚀 Start Minikube if not running
+      command: minikube start --driver=docker --cpus=4 --memory=4096
+      when: minikube_status.rc != 0
+      become: no
+      register: minikube_start
+      async: 300
+      poll: 10
+    
+    - name: 🔌 Enable Minikube addons
+      command: "minikube addons enable {{ item }}"
+      loop:
+        - ingress
+        - metrics-server
+        - dashboard
+      become: no
+      ignore_errors: yes
+    
+    - name: ✅ Verify Kubernetes cluster
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      become: no
+    
+    - name: 📊 Display cluster information
+      debug:
+        msg: "{{ cluster_info.stdout_lines }}"
+    
+    - name: 📍 Display final information
+      debug:
+        msg:
+          - "========================================="
+          - "✅ Environment setup completed!"
+          - "========================================="
+          - "Installed components:"
+          - "  ✓ Docker"
+          - "  ✓ kubectl"
+          - "  ✓ Minikube"
+          - "  ✓ Python Kubernetes packages"
+          - ""
+          - "Useful commands:"
+          - "  - Check cluster: kubectl cluster-info"
+          - "  - View nodes: kubectl get nodes"
+          - "  - Minikube dashboard: minikube dashboard"
+          - "  - Minikube IP: minikube ip"
+          - ""
+          - "Next steps:"
+          - "  1. Build Docker image: cd docker && docker build -t transport-app ."
+          - "  2. Deploy app: ansible-playbook -i inventory playbooks/deploy.yml"
+          - "========================================="

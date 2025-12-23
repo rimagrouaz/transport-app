@@ -1,0 +1,13 @@
+[local]
+localhost ansible_connection=local
+
+[kubernetes]
+k8s-master ansible_host=localhost ansible_connection=local
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+app_name=transport-app
+app_version=latest
+docker_registry=docker.io
+docker_username=your-dockerhub-username
+kube_namespace=default

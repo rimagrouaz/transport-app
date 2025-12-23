@@ -1,0 +1,150 @@
+---
+- name: Deploy Transport Optimization Application
+  hosts: kubernetes
+  become: yes
+  vars:
+    app_name: "transport-app"
+    app_version: "latest"
+    docker_image: "{{ docker_username }}/{{ app_name }}"
+    kube_manifests_dir: "../kubernetes"
+  
+  tasks:
+    - name: 📋 Display deployment information
+      debug:
+        msg:
+          - "Deploying {{ app_name }} version {{ app_version }}"
+          - "Docker image: {{ docker_image }}:{{ app_version }}"
+          - "Namespace: {{ kube_namespace }}"
+    
+    - name: 🔍 Check if kubectl is installed
+      command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+    
+    - name: ❌ Fail if kubectl is not installed
+      fail:
+        msg: "kubectl is not installed. Please install kubectl first."
+      when: kubectl_check.rc != 0
+    
+    - name: 🔍 Check if Minikube is running
+      command: kubectl cluster-info
+      register: cluster_check
+      changed_when: false
+      failed_when: false
+    
+    - name: ⚠️ Warning if cluster is not accessible
+      debug:
+        msg: "Warning: Cannot connect to Kubernetes cluster. Make sure Minikube is running."
+      when: cluster_check.rc != 0
+    
+    - name: 📦 Create namespace if not exists
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ kube_namespace }}"
+      when: kube_namespace != "default"
+      ignore_errors: yes
+    
+    - name: 🔐 Apply Kubernetes secrets
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ kube_manifests_dir }}/secret.yaml"
+        namespace: "{{ kube_namespace }}"
+      ignore_errors: yes
+    
+    - name: ⚙️ Apply ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ kube_manifests_dir }}/configmap.yaml"
+        namespace: "{{ kube_namespace }}"
+    
+    - name: 🚀 Apply Deployment
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ kube_manifests_dir }}/deployment.yaml"
+        namespace: "{{ kube_namespace }}"
+      register: deployment_result
+    
+    - name: 🌐 Apply Service
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ kube_manifests_dir }}/service.yaml"
+        namespace: "{{ kube_namespace }}"
+    
+    - name: 🔀 Apply Ingress
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ kube_manifests_dir }}/ingress.yaml"
+        namespace: "{{ kube_namespace }}"
+      ignore_errors: yes
+    
+    - name: ⏳ Wait for deployment to be ready
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: "{{ app_name }}"
+        namespace: "{{ kube_namespace }}"
+        wait: yes
+        wait_timeout: 300
+        wait_condition:
+          type: Available
+          status: "True"
+      register: deployment_status
+      retries: 5
+      delay: 10
+    
+    - name: 📊 Get deployment status
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ kube_namespace }}"
+        label_selectors:
+          - "app={{ app_name }}"
+      register: pod_status
+    
+    - name: ✅ Display pod information
+      debug:
+        msg:
+          - "Deployment successful!"
+          - "Number of pods: {{ pod_status.resources | length }}"
+          - "Pod names: {{ pod_status.resources | map(attribute='metadata.name') | list }}"
+    
+    - name: 🌐 Get service URL
+      shell: |
+        minikube service {{ app_name }}-service --url || echo "http://localhost:30080"
+      register: service_url
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: 📍 Display access information
+      debug:
+        msg:
+          - "========================================="
+          - "✅ Application deployed successfully!"
+          - "========================================="
+          - "Access URL: {{ service_url.stdout if service_url.rc == 0 else 'http://localhost:30080' }}"
+          - "Health check: {{ service_url.stdout if service_url.rc == 0 else 'http://localhost:30080' }}/health"
+          - ""
+          - "Useful commands:"
+          - "  - View pods: kubectl get pods -l app={{ app_name }}"
+          - "  - View logs: kubectl logs -l app={{ app_name }}"
+          - "  - View service: kubectl get svc {{ app_name }}-service"
+          - "========================================="
+
+  handlers:
+    - name: restart app
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ kube_namespace }}"
+          spec:
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/restartedAt: "{{ ansible_date_time.iso8601 }}"
