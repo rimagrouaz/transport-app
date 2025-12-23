@@ -70,6 +70,12 @@ pipeline {
         }
         
         stage('🔐 Security Scan - Code') {
+            agent { 
+                docker { 
+                    image 'python:3.9-slim'
+                    args '-u root'
+                } 
+            }
             steps {
                 script {
                     echo "Running security scan on code..."
@@ -84,6 +90,12 @@ pipeline {
         }
         
         stage('🐳 Build Docker Image') {
+            agent { 
+                docker { 
+                    image 'python:3.9-slim'
+                    args '-u root'
+                } 
+            }
             steps {
                 script {
                     echo "Building Docker image..."
@@ -96,6 +108,12 @@ pipeline {
         }
         
         stage('🔒 Security Scan - Image') {
+            agent { 
+                docker { 
+                    image 'python:3.9-slim'
+                    args '-u root'
+                } 
+            }
             steps {
                 script {
                     echo "Scanning Docker image for vulnerabilities..."
