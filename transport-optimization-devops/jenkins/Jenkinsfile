@@ -3,6 +3,7 @@ pipeline {
 
     environment {
         APP_NAME = 'transport-app'
+        // Version basée sur le numéro du build Jenkins
         APP_VERSION = "v${env.BUILD_NUMBER}"
         KUBE_NAMESPACE = 'transport'
     }
@@ -28,8 +29,8 @@ pipeline {
                     sh '''
                         python -m pip install --upgrade pip
                         pip install -r requirements.txt pytest
-                        # On lance les tests, mais on ne bloque pas si le dossier est vide
-                        python -m pytest tests/ || echo "⚠️ Aucun test trouvé."
+                        # On exécute les tests, le pipeline continue même si aucun test n'est trouvé
+                        python -m pytest tests/ || echo "⚠️ Aucun test trouvé ou échec des tests."
                     '''
                 }
             }
@@ -48,36 +49,36 @@ pipeline {
             agent {
                 docker {
                     image 'bitnami/kubectl:latest'
-                    /* IMPORTANT: On monte le dossier .kube de l'hôte vers le conteneur.
-                       Vérifie le chemin sur ton serveur (ex: /home/ubuntu/.kube ou /root/.kube)
-                    */
-                    args '-u root --entrypoint= -v /var/jenkins_home/.kube:/.kube'
+                    // On force l'entrypoint vide pour que Jenkins puisse piloter le conteneur
+                    args '-u root --entrypoint='
                 }
-            }
-            environment {
-                // On indique explicitement à kubectl d'utiliser le fichier monté
-                KUBECONFIG = '/.kube/config'
             }
             steps {
                 echo '🚀 Déploiement vers le cluster Kubernetes...'
-                dir('transport-optimization-devops') {
-                    sh '''
-                        echo "🔍 Vérification de la configuration..."
-                        kubectl config view
-                        
-                        echo "📁 Création du namespace si inexistant..."
-                        kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
-                        
-                        echo "🚀 Application des manifestes..."
-                        kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
-                        kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
-                        
-                        echo "🔄 Mise à jour de l image vers ${APP_VERSION}..."
-                        kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
-                        
-                        echo "✅ Attente de la stabilisation du déploiement..."
-                        kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
-                    '''
+                // Utilisation du Secret File créé dans Jenkins
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
+                    dir('transport-optimization-devops') {
+                        sh '''
+                            # On définit la variable d'environnement pour kubectl
+                            export KUBECONFIG=${KUBECFG}
+                            
+                            echo "🔍 Vérification de la connexion au cluster..."
+                            kubectl cluster-info
+                            
+                            echo "📁 Création du namespace ${KUBE_NAMESPACE} si nécessaire..."
+                            kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                            
+                            echo "🚀 Application des manifestes YAML..."
+                            kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
+                            kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
+                            
+                            echo "🔄 Mise à jour de l image vers ${APP_VERSION}..."
+                            kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
+                            
+                            echo "✅ Vérification du statut du déploiement..."
+                            kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
+                        '''
+                    }
                 }
             }
         }
@@ -85,13 +86,13 @@ pipeline {
 
     post {
         success {
-            echo '✅ PIPELINE TERMINÉ AVEC SUCCÈS !'
+            echo '✅ ✅ ✅ PIPELINE TERMINÉ AVEC SUCCÈS ! ✅ ✅ ✅'
         }
         failure {
-            echo '❌ ÉCHEC DU PIPELINE !'
+            echo '❌ ❌ ❌ LE PIPELINE A ÉCHOUÉ ! ❌ ❌ ❌'
         }
         always {
-            echo '🧹 Nettoyage des images Docker inutilisées...'
+            echo '🧹 Nettoyage des images Docker intermédiaires...'
             sh 'docker image prune -f || true'
         }
     }
