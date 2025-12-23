@@ -10,7 +10,7 @@ pipeline {
     stages {
         stage('🔍 Checkout') {
             steps {
-                echo '📥 Checking out source code...'
+                echo '📥 Récupération du code source...'
                 checkout scm
             }
         }
@@ -23,21 +23,21 @@ pipeline {
                 }
             }
             steps {
-                echo '📦 Installing Python dependencies & Running Tests...'
+                echo '📦 Installation des dépendances et Tests...'
                 dir('transport-optimization-devops/app') {
                     sh '''
                         python -m pip install --upgrade pip
                         pip install -r requirements.txt pytest
-                        # On ignore l'erreur si le dossier tests/ est vide pour ne pas stopper le build
-                        python -m pytest tests/ || echo "⚠️ Aucun test trouvé ou échec des tests."
+                        # On lance les tests, mais on ne bloque pas si le dossier est vide
+                        python -m pytest tests/ || echo "⚠️ Aucun test trouvé."
                     '''
                 }
             }
         }
 
-        stage('🐳 Build Docker Image (Local)') {
+        stage('🐳 Build Docker Image') {
             steps {
-                echo '🏗️ Building Docker image locally...'
+                echo '🏗️ Construction de l image Docker locale...'
                 dir('transport-optimization-devops') {
                     sh "docker build -t ${APP_NAME}:${APP_VERSION} -f docker/Dockerfile ."
                 }
@@ -48,29 +48,34 @@ pipeline {
             agent {
                 docker {
                     image 'bitnami/kubectl:latest'
-                    // Correction cruciale : on force le conteneur à rester ouvert avec 'cat'
-                    args '-u root --entrypoint='
+                    /* IMPORTANT: On monte le dossier .kube de l'hôte vers le conteneur.
+                       Vérifie le chemin sur ton serveur (ex: /home/ubuntu/.kube ou /root/.kube)
+                    */
+                    args '-u root --entrypoint= -v /var/jenkins_home/.kube:/.kube'
                 }
             }
+            environment {
+                // On indique explicitement à kubectl d'utiliser le fichier monté
+                KUBECONFIG = '/.kube/config'
+            }
             steps {
-                echo '🚀 Deploying to Kubernetes...'
+                echo '🚀 Déploiement vers le cluster Kubernetes...'
                 dir('transport-optimization-devops') {
                     sh '''
-                        echo "🔍 Checking Connectivity..."
-                        kubectl version --client
+                        echo "🔍 Vérification de la configuration..."
+                        kubectl config view
                         
-                        echo "📁 Ensuring Namespace exists..."
+                        echo "📁 Création du namespace si inexistant..."
                         kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
                         
-                        echo "🚀 Deploying Resources..."
-                        # Vérification des chemins de fichiers
+                        echo "🚀 Application des manifestes..."
                         kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
                         kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
                         
-                        echo "🔄 Updating Image to ${APP_VERSION}..."
+                        echo "🔄 Mise à jour de l image vers ${APP_VERSION}..."
                         kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
                         
-                        echo "✅ Verifying Deployment..."
+                        echo "✅ Attente de la stabilisation du déploiement..."
                         kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
                     '''
                 }
@@ -80,13 +85,13 @@ pipeline {
 
     post {
         success {
-            echo '✅ ✅ ✅ PIPELINE TERMINÉ AVEC SUCCÈS ! ✅ ✅ ✅'
-            echo "L'image ${APP_NAME}:${APP_VERSION} est déployée."
+            echo '✅ PIPELINE TERMINÉ AVEC SUCCÈS !'
         }
         failure {
-            echo '❌ ❌ ❌ LE PIPELINE A ÉCHOUÉ ! ❌ ❌ ❌'
+            echo '❌ ÉCHEC DU PIPELINE !'
         }
         always {
+            echo '🧹 Nettoyage des images Docker inutilisées...'
             sh 'docker image prune -f || true'
         }
     }
