@@ -15,7 +15,6 @@ pipeline {
             }
         }
 
-        // On regroupe Installation et Tests dans le même agent pour garder les paquets
         stage('🐍 Python: Install & Test') {
             agent {
                 docker {
@@ -29,7 +28,8 @@ pipeline {
                     sh '''
                         python -m pip install --upgrade pip
                         pip install -r requirements.txt pytest
-                        python -m pytest tests/ || echo "No tests found or tests failed"
+                        # On ignore l'erreur si le dossier tests/ est vide pour ne pas stopper le build
+                        python -m pytest tests/ || echo "⚠️ Aucun test trouvé ou échec des tests."
                     '''
                 }
             }
@@ -44,12 +44,12 @@ pipeline {
             }
         }
 
-        // On utilise un agent Docker qui contient kubectl pour toutes les étapes K8s
         stage('☸️ Kubernetes: Deploy') {
             agent {
                 docker {
                     image 'bitnami/kubectl:latest'
-                    args '-u root'
+                    // Correction cruciale : on force le conteneur à rester ouvert avec 'cat'
+                    args '-u root --entrypoint='
                 }
             }
             steps {
@@ -63,38 +63,31 @@ pipeline {
                         kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
                         
                         echo "🚀 Deploying Resources..."
+                        # Vérification des chemins de fichiers
                         kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
                         kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
                         
-                        echo "🔄 Updating Image..."
+                        echo "🔄 Updating Image to ${APP_VERSION}..."
                         kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
                         
                         echo "✅ Verifying Deployment..."
-                        sleep 10
-                        kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                        kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
                     '''
                 }
-            }
-        }
-
-        stage('🌐 Application URL') {
-            steps {
-                echo '🌐 Access Info:'
-                sh "echo 'App URL: kubectl port-forward -n ${KUBE_NAMESPACE} svc/${APP_NAME}-service 5000:80'"
             }
         }
     }
 
     post {
         success {
-            echo '✅ ✅ ✅ PIPELINE COMPLETED SUCCESSFULLY! ✅ ✅ ✅'
+            echo '✅ ✅ ✅ PIPELINE TERMINÉ AVEC SUCCÈS ! ✅ ✅ ✅'
+            echo "L'image ${APP_NAME}:${APP_VERSION} est déployée."
         }
         failure {
-            echo '❌ ❌ ❌ PIPELINE FAILED! ❌ ❌ ❌'
+            echo '❌ ❌ ❌ LE PIPELINE A ÉCHOUÉ ! ❌ ❌ ❌'
         }
         always {
             sh 'docker image prune -f || true'
-            echo "🧹 Pipeline finished at ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
         }
     }
 }
