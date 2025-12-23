@@ -2,43 +2,31 @@ pipeline {
     agent any
 
     environment {
+        // --- REMPLACE ICI PAR TON NOM D'UTILISATEUR DOCKERHUB ---
+        DOCKER_USER = 'rimagrouaz' 
         APP_NAME = 'transport-app'
         APP_VERSION = "v${env.BUILD_NUMBER}"
         KUBE_NAMESPACE = 'transport'
+        IMAGE_FULL_NAME = "${DOCKER_USER}/${APP_NAME}:${APP_VERSION}"
     }
 
     stages {
         stage('🔍 Checkout') {
             steps {
-                echo '📥 Récupération du code source...'
                 checkout scm
             }
         }
 
-        stage('🐍 Python: Install & Test') {
-            agent {
-                docker {
-                    image 'python:3.9-slim'
-                    args '-u root'
-                }
-            }
+        stage('🐳 Build & Push to DockerHub') {
             steps {
-                echo '📦 Installation des dépendances et Tests...'
-                dir('transport-optimization-devops/app') {
-                    sh '''
-                        python -m pip install --upgrade pip
-                        pip install -r requirements.txt pytest
-                        python -m pytest tests/ || echo "⚠️ Aucun test trouvé ou échec des tests."
-                    '''
-                }
-            }
-        }
-
-        stage('🐳 Build Docker Image') {
-            steps {
-                echo "🏗️ Construction de l'image Docker : ${APP_NAME}:${APP_VERSION}"
-                dir('transport-optimization-devops') {
-                    sh "docker build -t ${APP_NAME}:${APP_VERSION} -f docker/Dockerfile ."
+                script {
+                    dir('transport-optimization-devops') {
+                        // Connexion à DockerHub et Push de l'image
+                        docker.withRegistry('', 'dockerhub-credentials') {
+                            def customImage = docker.build("${IMAGE_FULL_NAME}", "-f docker/Dockerfile .")
+                            customImage.push()
+                        }
+                    }
                 }
             }
         }
@@ -51,47 +39,36 @@ pipeline {
                 }
             }
             steps {
-                echo '🚀 Déploiement vers le cluster Kubernetes...'
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
-                    dir('.') {
-                        sh '''
-                            cp ${KUBECFG} ./kubeconfig_tmp
-                            export KUBECONFIG=./kubeconfig_tmp
-                            
-                            echo "Network fix: Pointing 127.0.0.1 to host.docker.internal"
-                            sed -i 's/127.0.0.1/host.docker.internal/g' ./kubeconfig_tmp
-                            
-                            # On définit un alias pour inclure le skip-tls automatiquement
-                            alias k='kubectl --insecure-skip-tls-verify=true'
+                    sh '''
+                        cp ${KUBECFG} ./kubeconfig_tmp
+                        export KUBECONFIG=./kubeconfig_tmp
+                        sed -i 's/127.0.0.1/host.docker.internal/g' ./kubeconfig_tmp
+                        
+                        # Alias pour ignorer le TLS
+                        alias k='kubectl --insecure-skip-tls-verify=true'
 
-                            echo "🔍 Vérification de la connexion au cluster..."
-                            k cluster-info
-                            
-                            echo "📁 Création du namespace ${KUBE_NAMESPACE}..."
-                            k create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | k apply -f -
-                            
-                            echo "🚀 Application des manifestes YAML..."
-                            k apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
-                            k apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
-                            
-                            echo "🔄 Mise à jour de l'image vers ${APP_NAME}:${APP_VERSION}..."
-                            k set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
-                            
-                            echo "✅ Vérification du statut..."
-                            k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=5m
-                        '''
-                    }
+                        echo "🚀 Déploiement de l'image distante : ${IMAGE_FULL_NAME}"
+                        
+                        k apply -f transport-optimization-devops/kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
+                        k apply -f transport-optimization-devops/kubernetes/service.yaml -n ${KUBE_NAMESPACE}
+                        
+                        # On force l'utilisation de l'image DockerHub
+                        k set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL_NAME} -n ${KUBE_NAMESPACE}
+                        
+                        echo "⏳ Attente du démarrage..."
+                        k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                    '''
                 }
             }
         }
     }
 
     post {
-        success { echo '✅ ✅ ✅ PIPELINE TERMINÉ AVEC SUCCÈS ! ✅ ✅ ✅' }
-        failure { echo '❌ ❌ ❌ LE PIPELINE A ÉCHOUÉ ! ❌ ❌ ❌' }
+        success { echo '✅ DÉPLOIEMENT RÉUSSI SUR LE CLUSTER !' }
+        failure { echo '❌ ÉCHEC : Vérifie les logs DockerHub ou Kubernetes' }
         always {
-            echo '🧹 Nettoyage...'
-            sh 'docker image prune -f || true'
+            sh "docker rmi ${IMAGE_FULL_NAME} || true"
         }
     }
 }
