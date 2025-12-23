@@ -38,8 +38,9 @@ pipeline {
 
         stage('🐳 Build Docker Image') {
             steps {
-                echo '🏗️ Construction de l image Docker locale...'
+                echo "🏗️ Construction de l'image Docker : ${APP_NAME}:${APP_VERSION}"
                 dir('transport-optimization-devops') {
+                    // Utilisation de guillemets doubles pour que Jenkins remplace les variables
                     sh "docker build -t ${APP_NAME}:${APP_VERSION} -f docker/Dockerfile ."
                 }
             }
@@ -49,17 +50,15 @@ pipeline {
             agent {
                 docker {
                     image 'bitnami/kubectl:latest'
-                    // On force l'entrypoint vide pour que Jenkins puisse piloter le conteneur
+                    // Entrypoint vide pour laisser Jenkins exécuter ses scripts
                     args '-u root --entrypoint='
                 }
             }
             steps {
                 echo '🚀 Déploiement vers le cluster Kubernetes...'
-                // Utilisation du Secret File créé dans Jenkins
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
                     dir('transport-optimization-devops') {
                         sh '''
-                            # On définit la variable d'environnement pour kubectl
                             export KUBECONFIG=${KUBECFG}
                             
                             echo "🔍 Vérification de la connexion au cluster..."
@@ -72,7 +71,7 @@ pipeline {
                             kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
                             kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
                             
-                            echo "🔄 Mise à jour de l image vers ${APP_VERSION}..."
+                            echo "🔄 Mise à jour de l'image vers ${APP_NAME}:${APP_VERSION}..."
                             kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
                             
                             echo "✅ Vérification du statut du déploiement..."
@@ -87,12 +86,15 @@ pipeline {
     post {
         success {
             echo '✅ ✅ ✅ PIPELINE TERMINÉ AVEC SUCCÈS ! ✅ ✅ ✅'
+            echo "L'application est disponible dans le namespace : ${KUBE_NAMESPACE}"
         }
         failure {
             echo '❌ ❌ ❌ LE PIPELINE A ÉCHOUÉ ! ❌ ❌ ❌'
+            echo 'Vérifiez les logs de la console pour diagnostiquer le problème.'
         }
         always {
-            echo '🧹 Nettoyage des images Docker intermédiaires...'
+            echo '🧹 Nettoyage des images Docker...'
+            // On nettoie les images inutilisées pour éviter de saturer le disque
             sh 'docker image prune -f || true'
         }
     }
