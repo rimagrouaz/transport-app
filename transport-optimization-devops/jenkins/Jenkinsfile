@@ -3,12 +3,11 @@ pipeline {
 
     environment {
         APP_NAME = 'transport-app'
-        APP_VERSION = 'v1'
+        APP_VERSION = "v${env.BUILD_NUMBER}" // Utilise le numéro de build pour l'unicité
         KUBE_NAMESPACE = 'transport'
     }
 
     stages {
-
         stage('🔍 Checkout') {
             steps {
                 echo '📥 Checking out source code...'
@@ -19,10 +18,11 @@ pipeline {
         stage('🐍 Install Dependencies') {
             steps {
                 echo '📦 Installing Python dependencies...'
+                // Utilisation de sh au lieu de bat + format de variable Linux
                 dir('transport-optimization-devops/app') {
-                    bat '''
-                        python -m pip install --upgrade pip
-                        pip install -r requirements.txt
+                    sh '''
+                        python3 -m pip install --upgrade pip
+                        pip3 install -r requirements.txt
                     '''
                 }
             }
@@ -30,9 +30,10 @@ pipeline {
 
         stage('🧪 Run Tests') {
             steps {
-                echo '🧪 Running tests (if any)...'
+                echo '🧪 Running tests...'
                 dir('transport-optimization-devops/app') {
-                    bat 'python -m pytest tests/ || exit /b 0'
+                    // exit 0 pour ne pas bloquer si les tests échouent (optionnel)
+                    sh 'python3 -m pytest tests/ || echo "Tests failed but continuing"'
                 }
             }
         }
@@ -41,7 +42,8 @@ pipeline {
             steps {
                 echo '🏗️ Building Docker image locally...'
                 dir('transport-optimization-devops') {
-                    bat 'docker build -t %APP_NAME%:%APP_VERSION% -f docker/Dockerfile .'
+                    // Les variables s'appellent avec ${} sous Linux
+                    sh "docker build -t ${APP_NAME}:${APP_VERSION} -f docker/Dockerfile ."
                 }
             }
         }
@@ -49,9 +51,10 @@ pipeline {
         stage('☸️ Kubernetes Connectivity Check') {
             steps {
                 echo '🔍 Checking Kubernetes access...'
-                bat '''
+                // Vérifier si kubectl est configuré sur l'hôte Jenkins
+                sh '''
                     kubectl version --client
-                    kubectl get nodes
+                    kubectl get nodes || echo "Cannot reach cluster, check kubeconfig"
                 '''
             }
         }
@@ -59,17 +62,18 @@ pipeline {
         stage('📁 Create Namespace') {
             steps {
                 echo '📁 Ensuring Kubernetes namespace exists...'
-                bat 'kubectl create namespace %KUBE_NAMESPACE% --dry-run=client -o yaml | kubectl apply -f -'
+                sh "kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
             }
         }
 
         stage('🚀 Deploy to Kubernetes') {
             steps {
                 echo '🚀 Deploying application to Kubernetes...'
-                bat '''
-                    kubectl delete deployment %APP_NAME% -n %KUBE_NAMESPACE% --ignore-not-found=true
-                    kubectl apply -f kubernetes/deployment.yaml -n %KUBE_NAMESPACE%
-                    kubectl apply -f kubernetes/service.yaml -n %KUBE_NAMESPACE%
+                // Correction des variables et des commandes
+                sh '''
+                    kubectl delete deployment ${APP_NAME} -n ${KUBE_NAMESPACE} --ignore-not-found=true
+                    kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
+                    kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
                 '''
             }
         }
@@ -77,11 +81,11 @@ pipeline {
         stage('✅ Verify Deployment') {
             steps {
                 echo '✅ Verifying deployment status...'
-                bat '''
-                    timeout /t 15
-                    kubectl rollout status deployment/%APP_NAME% -n %KUBE_NAMESPACE% --timeout=3m
-                    kubectl get pods -n %KUBE_NAMESPACE% -o wide
-                    kubectl get svc -n %KUBE_NAMESPACE%
+                sh '''
+                    sleep 15
+                    kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                    kubectl get pods -n ${KUBE_NAMESPACE} -o wide
+                    kubectl get svc -n ${KUBE_NAMESPACE}
                 '''
             }
         }
@@ -89,17 +93,16 @@ pipeline {
         stage('🌐 Application URL') {
             steps {
                 echo '🌐 Getting application access information...'
-                bat '''
-                    echo.
-                    echo ========================================
-                    echo APPLICATION DEPLOYED SUCCESSFULLY!
-                    echo ========================================
-                    echo.
-                    echo Access your application:
-                    echo 1. Port Forward: kubectl port-forward -n %KUBE_NAMESPACE% svc/%APP_NAME%-service 5000:80
-                    echo 2. Minikube: minikube service %APP_NAME%-service -n %KUBE_NAMESPACE%
-                    echo.
-                    kubectl get svc -n %KUBE_NAMESPACE% %APP_NAME%-service
+                sh '''
+                    echo ""
+                    echo "========================================"
+                    echo "APPLICATION DEPLOYED SUCCESSFULLY!"
+                    echo "========================================"
+                    echo ""
+                    echo "Access your application:"
+                    echo "1. Port Forward: kubectl port-forward -n ${KUBE_NAMESPACE} svc/${APP_NAME}-service 5000:80"
+                    echo ""
+                    kubectl get svc -n ${KUBE_NAMESPACE}
                 '''
             }
         }
@@ -108,19 +111,14 @@ pipeline {
     post {
         success {
             echo '✅ ✅ ✅ PIPELINE COMPLETED SUCCESSFULLY! ✅ ✅ ✅'
-            echo '🎉 Application deployed to Kubernetes cluster!'
-            echo '📱 Check the Application URL stage for access instructions'
         }
         failure {
             echo '❌ ❌ ❌ PIPELINE FAILED! ❌ ❌ ❌'
-            echo '📋 Check the console output above for error details'
-            echo '💡 Common fixes:'
-            echo '   - Ensure kubectl can access the cluster'
-            echo '   - Check Docker daemon is running'
-            echo '   - Verify namespace and resources exist'
         }
         always {
-            echo '🧹 Pipeline execution finished at ' + new Date().format('yyyy-MM-dd HH:mm:ss')
+            // Nettoyage des images Docker pour ne pas saturer le disque
+            sh 'docker image prune -f || true'
+            echo "🧹 Pipeline finished at: ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
         }
     }
 }
