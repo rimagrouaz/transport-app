@@ -55,29 +55,30 @@ pipeline {
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
                     dir('transport-optimization-devops') {
                         sh '''
-                            # On copie le fichier pour pouvoir le modifier
                             cp ${KUBECFG} ./kubeconfig_tmp
                             export KUBECONFIG=./kubeconfig_tmp
                             
                             echo "Network fix: Pointing 127.0.0.1 to host.docker.internal"
-                            # Cette ligne remplace l'IP locale par l'adresse de ton Windows
                             sed -i 's/127.0.0.1/host.docker.internal/g' ./kubeconfig_tmp
                             
+                            # On définit un alias pour inclure le skip-tls automatiquement
+                            alias k='kubectl --insecure-skip-tls-verify=true'
+
                             echo "🔍 Vérification de la connexion au cluster..."
-                            kubectl cluster-info
+                            k cluster-info
                             
                             echo "📁 Création du namespace ${KUBE_NAMESPACE}..."
-                            kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                            k create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | k apply -f -
                             
                             echo "🚀 Application des manifestes YAML..."
-                            kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
-                            kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
+                            k apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
+                            k apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
                             
                             echo "🔄 Mise à jour de l'image vers ${APP_NAME}:${APP_VERSION}..."
-                            kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
+                            k set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
                             
                             echo "✅ Vérification du statut..."
-                            kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
+                            k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m
                         '''
                     }
                 }
