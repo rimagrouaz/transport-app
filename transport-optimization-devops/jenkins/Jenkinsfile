@@ -54,6 +54,10 @@ pipeline {
                     echo "Running unit tests..."
                 }
                 sh '''
+                    # 1. Installer les dépendances nécessaires aux tests
+                    pip install pytest pytest-cov Flask requests polyline haversine gunicorn flask-cors openrouteservice
+            
+                    # 2. Lancer les tests
                     cd transport-optimization-devops/tests
                     python -m pytest test_app.py -v --junitxml=test-results.xml --cov=app --cov-report=xml
                 '''
