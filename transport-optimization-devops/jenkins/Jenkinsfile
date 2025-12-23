@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         APP_NAME = 'transport-app'
-        APP_VERSION = "v${env.BUILD_NUMBER}" // Version dynamique pour éviter les conflits
+        APP_VERSION = "v${env.BUILD_NUMBER}"
         KUBE_NAMESPACE = 'transport'
     }
 
@@ -15,8 +15,8 @@ pipeline {
             }
         }
 
-        stage('🐍 Install Dependencies') {
-            // Ajout de l'agent Docker pour garantir la présence de Python et Pip
+        // On regroupe Installation et Tests dans le même agent pour garder les paquets
+        stage('🐍 Python: Install & Test') {
             agent {
                 docker {
                     image 'python:3.9-slim'
@@ -24,28 +24,13 @@ pipeline {
                 }
             }
             steps {
-                echo '📦 Installing Python dependencies...'
+                echo '📦 Installing Python dependencies & Running Tests...'
                 dir('transport-optimization-devops/app') {
                     sh '''
                         python -m pip install --upgrade pip
-                        pip install -r requirements.txt
+                        pip install -r requirements.txt pytest
+                        python -m pytest tests/ || echo "No tests found or tests failed"
                     '''
-                }
-            }
-        }
-
-        stage('🧪 Run Tests') {
-            // On utilise le même agent pour les tests
-            agent {
-                docker {
-                    image 'python:3.9-slim'
-                    args '-u root'
-                }
-            }
-            steps {
-                echo '🧪 Running tests (if any)...'
-                dir('transport-optimization-devops/app') {
-                    sh 'python -m pytest tests/ || echo "No tests found or tests failed"'
                 }
             }
         }
@@ -54,66 +39,48 @@ pipeline {
             steps {
                 echo '🏗️ Building Docker image locally...'
                 dir('transport-optimization-devops') {
-                    // Ici on utilise l'hôte car Docker est déjà sur Jenkins
                     sh "docker build -t ${APP_NAME}:${APP_VERSION} -f docker/Dockerfile ."
                 }
             }
         }
 
-        stage('☸️ Kubernetes Connectivity Check') {
-            steps {
-                echo '🔍 Checking Kubernetes access...'
-                sh '''
-                    kubectl version --client
-                    kubectl get nodes || echo "Cluster unreachable"
-                '''
+        // On utilise un agent Docker qui contient kubectl pour toutes les étapes K8s
+        stage('☸️ Kubernetes: Deploy') {
+            agent {
+                docker {
+                    image 'bitnami/kubectl:latest'
+                    args '-u root'
+                }
             }
-        }
-
-        stage('📁 Create Namespace') {
             steps {
-                echo '📁 Ensuring Kubernetes namespace exists...'
-                sh "kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
-            }
-        }
-
-        stage('🚀 Deploy to Kubernetes') {
-            steps {
-                echo '🚀 Deploying application to Kubernetes...'
-                sh '''
-                    kubectl delete deployment ${APP_NAME} -n ${KUBE_NAMESPACE} --ignore-not-found=true
-                    kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
-                    kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
-                '''
-            }
-        }
-
-        stage('✅ Verify Deployment') {
-            steps {
-                echo '✅ Verifying deployment status...'
-                sh '''
-                    sleep 15
-                    kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
-                    kubectl get pods -n ${KUBE_NAMESPACE} -o wide
-                    kubectl get svc -n ${KUBE_NAMESPACE}
-                '''
+                echo '🚀 Deploying to Kubernetes...'
+                dir('transport-optimization-devops') {
+                    sh '''
+                        echo "🔍 Checking Connectivity..."
+                        kubectl version --client
+                        
+                        echo "📁 Ensuring Namespace exists..."
+                        kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                        
+                        echo "🚀 Deploying Resources..."
+                        kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
+                        kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
+                        
+                        echo "🔄 Updating Image..."
+                        kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE}
+                        
+                        echo "✅ Verifying Deployment..."
+                        sleep 10
+                        kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                    '''
+                }
             }
         }
 
         stage('🌐 Application URL') {
             steps {
-                echo '🌐 Getting application access information...'
-                sh '''
-                    echo ""
-                    echo "========================================"
-                    echo "APPLICATION DEPLOYED SUCCESSFULLY!"
-                    echo "========================================"
-                    echo ""
-                    echo "Access your application:"
-                    echo "1. Port Forward: kubectl port-forward -n ${KUBE_NAMESPACE} svc/${APP_NAME}-service 5000:80"
-                    echo ""
-                    kubectl get svc -n ${KUBE_NAMESPACE}
-                '''
+                echo '🌐 Access Info:'
+                sh "echo 'App URL: kubectl port-forward -n ${KUBE_NAMESPACE} svc/${APP_NAME}-service 5000:80'"
             }
         }
     }
@@ -126,7 +93,6 @@ pipeline {
             echo '❌ ❌ ❌ PIPELINE FAILED! ❌ ❌ ❌'
         }
         always {
-            // Nettoyage pour ne pas saturer l'espace disque
             sh 'docker image prune -f || true'
             echo "🧹 Pipeline finished at ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
         }
