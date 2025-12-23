@@ -28,8 +28,9 @@ pipeline {
         
         stage('📦 Install Dependencies') {
             agent {
-                docker { image 'python:3.9-slim' } // Le plugin Docker va créer un environnement avec PIP déjà dedans
-                args '-u root'
+                docker { image 'python:3.9-slim'
+                        args '-u root'
+                       } // Le plugin Docker va créer un environnement avec PIP déjà dedans
             }
             steps {
                 script {
