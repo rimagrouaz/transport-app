@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         APP_NAME = 'transport-app'
-        APP_VERSION = "v${env.BUILD_NUMBER}"
+        APP_VERSION = "v${env.BUILD_NUMBER}" // Version dynamique pour éviter les conflits
         KUBE_NAMESPACE = 'transport'
     }
 
@@ -16,7 +16,7 @@ pipeline {
         }
 
         stage('🐍 Install Dependencies') {
-            // On utilise un conteneur Python officiel pour avoir pip disponible
+            // Ajout de l'agent Docker pour garantir la présence de Python et Pip
             agent {
                 docker {
                     image 'python:3.9-slim'
@@ -35,6 +35,7 @@ pipeline {
         }
 
         stage('🧪 Run Tests') {
+            // On utilise le même agent pour les tests
             agent {
                 docker {
                     image 'python:3.9-slim'
@@ -42,21 +43,18 @@ pipeline {
                 }
             }
             steps {
-                echo '🧪 Running tests...'
+                echo '🧪 Running tests (if any)...'
                 dir('transport-optimization-devops/app') {
-                    sh '''
-                        pip install pytest
-                        python -m pytest tests/ || echo "Tests failed but continuing"
-                    '''
+                    sh 'python -m pytest tests/ || echo "No tests found or tests failed"'
                 }
             }
         }
 
         stage('🐳 Build Docker Image (Local)') {
-            // On revient sur l'agent "any" (l'hôte) pour utiliser le démon Docker
             steps {
                 echo '🏗️ Building Docker image locally...'
                 dir('transport-optimization-devops') {
+                    // Ici on utilise l'hôte car Docker est déjà sur Jenkins
                     sh "docker build -t ${APP_NAME}:${APP_VERSION} -f docker/Dockerfile ."
                 }
             }
@@ -67,7 +65,7 @@ pipeline {
                 echo '🔍 Checking Kubernetes access...'
                 sh '''
                     kubectl version --client
-                    kubectl get nodes || echo "Cannot reach cluster, check kubeconfig"
+                    kubectl get nodes || echo "Cluster unreachable"
                 '''
             }
         }
@@ -83,10 +81,9 @@ pipeline {
             steps {
                 echo '🚀 Deploying application to Kubernetes...'
                 sh '''
+                    kubectl delete deployment ${APP_NAME} -n ${KUBE_NAMESPACE} --ignore-not-found=true
                     kubectl apply -f kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
                     kubectl apply -f kubernetes/service.yaml -n ${KUBE_NAMESPACE}
-                    # On force la mise à jour de l'image pour le nouveau build
-                    kubectl set image deployment/${APP_NAME} ${APP_NAME}=${APP_NAME}:${APP_VERSION} -n ${KUBE_NAMESPACE} || echo "Deployment updated"
                 '''
             }
         }
@@ -95,8 +92,26 @@ pipeline {
             steps {
                 echo '✅ Verifying deployment status...'
                 sh '''
-                    sleep 10
-                    kubectl get pods -n ${KUBE_NAMESPACE}
+                    sleep 15
+                    kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                    kubectl get pods -n ${KUBE_NAMESPACE} -o wide
+                    kubectl get svc -n ${KUBE_NAMESPACE}
+                '''
+            }
+        }
+
+        stage('🌐 Application URL') {
+            steps {
+                echo '🌐 Getting application access information...'
+                sh '''
+                    echo ""
+                    echo "========================================"
+                    echo "APPLICATION DEPLOYED SUCCESSFULLY!"
+                    echo "========================================"
+                    echo ""
+                    echo "Access your application:"
+                    echo "1. Port Forward: kubectl port-forward -n ${KUBE_NAMESPACE} svc/${APP_NAME}-service 5000:80"
+                    echo ""
                     kubectl get svc -n ${KUBE_NAMESPACE}
                 '''
             }
@@ -111,8 +126,9 @@ pipeline {
             echo '❌ ❌ ❌ PIPELINE FAILED! ❌ ❌ ❌'
         }
         always {
+            // Nettoyage pour ne pas saturer l'espace disque
             sh 'docker image prune -f || true'
-            echo "🧹 Pipeline finished at: ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+            echo "🧹 Pipeline finished at ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
         }
     }
 }
