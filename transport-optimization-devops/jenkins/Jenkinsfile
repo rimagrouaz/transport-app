@@ -26,7 +26,12 @@ pipeline {
         }
 
         stage('🐍 Install Dependencies & Run Tests') {
-            agent any
+            agent {
+                docker {
+                    image 'python:3.11-slim'
+                    args '-u root'
+                }
+            }
             steps {
                 unstash 'source-code'
                 echo '📦 Installing Python dependencies...'
