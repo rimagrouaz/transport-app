@@ -1,120 +1,153 @@
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: transport-app
-  labels:
-    app: transport-app
-    version: v1
-    tier: backend
-spec:
-  replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 1
-  selector:
-    matchLabels:
-      app: transport-app
-  template:
-    metadata:
-      labels:
-        app: transport-app
-        version: v1
-        tier: backend
-    spec:
-      containers:
-      - name: transport-app
-        image: rimagrouaz/transport-app:v1
-        imagePullPolicy: Never
-        ports:
-        - containerPort: 5001
-          name: http
-          protocol: TCP
-        env:
-        - name: FLASK_APP
-          value: "app.py"
-        - name: FLASK_ENV
-          value: "production"
-        - name: PORT
-          value: "5001"
-        - name: ORS_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: transport-secrets
-              key: ors-api-key
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "250m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 5001
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 5001
-          initialDelaySeconds: 20
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 3
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 1000
-          readOnlyRootFilesystem: false
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-      restartPolicy: Always
-      terminationGracePeriodSeconds: 30
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: transport-app-hpa
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: transport-app
-  minReplicas: 2
-  maxReplicas: 10
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 70
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 80
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-      - type: Percent
-        value: 50
-        periodSeconds: 15
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      policies:
-      - type: Percent
-        value: 100
-        periodSeconds: 15
-      - type: Pods
-        value: 2
-        periodSeconds: 15
-      selectPolicy: Max
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_USER = 'rimagrouaz' 
+        APP_NAME = 'transport-app'
+        APP_VERSION = "v${env.BUILD_NUMBER}"
+        KUBE_NAMESPACE = 'transport'
+        IMAGE_FULL_NAME = "${DOCKER_USER}/${APP_NAME}:${APP_VERSION}"
+        DOCKER_BUILDKIT = '1'
+    }
+    
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    
+    stages {
+        stage('🔍 Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('🐳 Build & Push to DockerHub') {
+            agent {
+                docker {
+                    image 'docker:latest'
+                    args '-v /var/run/docker.sock:/var/run/docker.sock --user root'
+                    reuseNode true
+                }
+            }
+            steps {
+                script {
+                    dir('transport-optimization-devops') {
+                        withCredentials([usernamePassword(
+                            credentialsId: 'dockerhub-credentials',
+                            usernameVariable: 'DOCKER_USERNAME',
+                            passwordVariable: 'DOCKER_PASSWORD'
+                        )]) {
+                            sh '''
+                                echo "🔐 Connexion à DockerHub..."
+                                echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                                
+                                echo "🔨 Build de l'image Docker..."
+                                docker build \
+                                    --cache-from ${DOCKER_USER}/${APP_NAME}:latest \
+                                    --build-arg BUILDKIT_INLINE_CACHE=1 \
+                                    -t ${IMAGE_FULL_NAME} \
+                                    -t ${DOCKER_USER}/${APP_NAME}:latest \
+                                    -f docker/Dockerfile .
+                                
+                                echo "📤 Push vers DockerHub..."
+                                docker push ${IMAGE_FULL_NAME}
+                                docker push ${DOCKER_USER}/${APP_NAME}:latest
+                                
+                                echo "✅ Image publiée : ${IMAGE_FULL_NAME}"
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('☸️ Kubernetes: Deploy') {
+            agent {
+                docker {
+                    image 'bitnami/kubectl:latest'
+                    args '-u root --entrypoint= -v /var/run/docker.sock:/var/run/docker.sock'
+                    reuseNode true
+                }
+            }
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
+                    sh '''
+                        echo "📋 Configuration de kubectl..."
+                        cp ${KUBECFG} ./kubeconfig_tmp
+                        export KUBECONFIG=./kubeconfig_tmp
+                        sed -i 's/127.0.0.1/host.docker.internal/g' ./kubeconfig_tmp
+                        
+                        alias k='kubectl --insecure-skip-tls-verify=true'
+                        
+                        echo "🚀 Déploiement de l'image : ${IMAGE_FULL_NAME}"
+                        
+                        # Applique tous les manifests
+                        k apply -f transport-optimization-devops/kubernetes/ -n ${KUBE_NAMESPACE} || {
+                            echo "⚠️ Création du namespace si nécessaire..."
+                            k create namespace ${KUBE_NAMESPACE} || true
+                            k apply -f transport-optimization-devops/kubernetes/ -n ${KUBE_NAMESPACE}
+                        }
+                        
+                        # Force la mise à jour de l'image
+                        k set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL_NAME} -n ${KUBE_NAMESPACE}
+                        
+                        # Rollout avec timeout réduit
+                        echo "⏳ Vérification du déploiement..."
+                        k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m || {
+                            echo "⚠️ Timeout atteint, vérification des pods..."
+                            k get pods -n ${KUBE_NAMESPACE} -l app=${APP_NAME}
+                            k describe pods -n ${KUBE_NAMESPACE} -l app=${APP_NAME}
+                            exit 1
+                        }
+                        
+                        # Vérification finale
+                        READY_PODS=$(k get deployment/${APP_NAME} -n ${KUBE_NAMESPACE} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+                        DESIRED_PODS=$(k get deployment/${APP_NAME} -n ${KUBE_NAMESPACE} -o jsonpath='{.spec.replicas}')
+                        
+                        echo "📊 État du déploiement : ${READY_PODS}/${DESIRED_PODS} pods prêts"
+                        
+                        if [ "$READY_PODS" = "$DESIRED_PODS" ] && [ "$READY_PODS" != "0" ]; then
+                            echo "✅ Déploiement réussi !"
+                            k get pods -n ${KUBE_NAMESPACE} -l app=${APP_NAME}
+                        else
+                            echo "❌ Échec : Pods non prêts"
+                            k get events -n ${KUBE_NAMESPACE} --sort-by='.lastTimestamp' | tail -20
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        success { 
+            echo '✅ DÉPLOIEMENT RÉUSSI SUR LE CLUSTER !'
+            echo "🌐 Image déployée : ${IMAGE_FULL_NAME}"
+        }
+        failure { 
+            echo '❌ ÉCHEC : Vérifie les logs ci-dessus'
+            script {
+                try {
+                    sh """
+                        docker ps || echo "Docker non disponible"
+                        docker images | grep ${APP_NAME} || echo "Image non trouvée"
+                    """
+                } catch (Exception e) {
+                    echo "Impossible de vérifier Docker : ${e.message}"
+                }
+            }
+        }
+        always {
+            script {
+                try {
+                    sh "docker rmi ${IMAGE_FULL_NAME} || true"
+                } catch (Exception e) {
+                    echo "Nettoyage de l'image ignoré"
+                }
+            }
+            cleanWs(deleteDirs: true, patterns: [[pattern: 'kubeconfig_tmp', type: 'INCLUDE']])
+        }
+    }
+}
