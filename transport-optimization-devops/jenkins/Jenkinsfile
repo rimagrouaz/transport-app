@@ -28,8 +28,8 @@ pipeline {
         stage('🐍 Install Dependencies & Run Tests') {
             agent {
                 docker {
-                    image 'python:3.11-slim'
-                    args '-u root'
+                    image 'docker:24-dind'
+                    args '--privileged -v /var/run/docker.sock:/var/run/docker.sock'
                 }
             }
             steps {
