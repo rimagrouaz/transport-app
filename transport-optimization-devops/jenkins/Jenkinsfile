@@ -1,41 +1,57 @@
 pipeline {
     agent any
-
     environment {
-        // --- REMPLACE ICI PAR TON NOM D'UTILISATEUR DOCKERHUB ---
         DOCKER_USER = 'rimagrouaz' 
         APP_NAME = 'transport-app'
         APP_VERSION = "v${env.BUILD_NUMBER}"
         KUBE_NAMESPACE = 'transport'
         IMAGE_FULL_NAME = "${DOCKER_USER}/${APP_NAME}:${APP_VERSION}"
+        // Cache Docker pour accélérer les builds
+        DOCKER_BUILDKIT = '1'
     }
-
+    
+    options {
+        // Limite le temps total du pipeline
+        timeout(time: 15, unit: 'MINUTES')
+        // Garde seulement les 10 derniers builds
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    
     stages {
         stage('🔍 Checkout') {
             steps {
                 checkout scm
             }
         }
-
+        
         stage('🐳 Build & Push to DockerHub') {
             steps {
                 script {
                     dir('transport-optimization-devops') {
-                        // Connexion à DockerHub et Push de l'image
                         docker.withRegistry('', 'dockerhub-credentials') {
-                            def customImage = docker.build("${IMAGE_FULL_NAME}", "-f docker/Dockerfile .")
-                            customImage.push()
+                            // Build avec cache et optimisations
+                            def customImage = docker.build(
+                                "${IMAGE_FULL_NAME}", 
+                                "--cache-from ${DOCKER_USER}/${APP_NAME}:latest --build-arg BUILDKIT_INLINE_CACHE=1 -f docker/Dockerfile ."
+                            )
+                            // Push en parallèle de la version et du tag latest
+                            parallel(
+                                "Push Version": { customImage.push() },
+                                "Push Latest": { customImage.push('latest') }
+                            )
                         }
                     }
                 }
             }
         }
-
+        
         stage('☸️ Kubernetes: Deploy') {
             agent {
                 docker {
                     image 'bitnami/kubectl:latest'
                     args '-u root --entrypoint='
+                    // Réutilise le même conteneur pour économiser du temps
+                    reuseNode true
                 }
             }
             steps {
@@ -45,30 +61,53 @@ pipeline {
                         export KUBECONFIG=./kubeconfig_tmp
                         sed -i 's/127.0.0.1/host.docker.internal/g' ./kubeconfig_tmp
                         
-                        # Alias pour ignorer le TLS
                         alias k='kubectl --insecure-skip-tls-verify=true'
-
-                        echo "🚀 Déploiement de l'image distante : ${IMAGE_FULL_NAME}"
                         
-                        k apply -f transport-optimization-devops/kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
-                        k apply -f transport-optimization-devops/kubernetes/service.yaml -n ${KUBE_NAMESPACE}
+                        echo "🚀 Déploiement de l'image : ${IMAGE_FULL_NAME}"
                         
-                        # On force l'utilisation de l'image DockerHub
+                        # Applique tous les manifests en une seule commande
+                        k apply -f transport-optimization-devops/kubernetes/ -n ${KUBE_NAMESPACE}
+                        
+                        # Force la mise à jour de l'image
                         k set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL_NAME} -n ${KUBE_NAMESPACE}
                         
-                        echo "⏳ Attente du démarrage..."
-                        k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                        # Rollout avec timeout réduit et vérification rapide
+                        echo "⏳ Vérification du déploiement..."
+                        k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m || {
+                            echo "⚠️  Timeout atteint, vérification manuelle..."
+                            k get pods -n ${KUBE_NAMESPACE} -l app=${APP_NAME}
+                            exit 1
+                        }
+                        
+                        # Vérification que les pods sont bien Running
+                        READY_PODS=$(k get deployment/${APP_NAME} -n ${KUBE_NAMESPACE} -o jsonpath='{.status.readyReplicas}')
+                        DESIRED_PODS=$(k get deployment/${APP_NAME} -n ${KUBE_NAMESPACE} -o jsonpath='{.spec.replicas}')
+                        
+                        if [ "$READY_PODS" = "$DESIRED_PODS" ]; then
+                            echo "✅ ${READY_PODS}/${DESIRED_PODS} pods prêts"
+                        else
+                            echo "❌ Seulement ${READY_PODS}/${DESIRED_PODS} pods prêts"
+                            exit 1
+                        fi
                     '''
                 }
             }
         }
     }
-
+    
     post {
-        success { echo '✅ DÉPLOIEMENT RÉUSSI SUR LE CLUSTER !' }
-        failure { echo '❌ ÉCHEC : Vérifie les logs DockerHub ou Kubernetes' }
+        success { 
+            echo '✅ DÉPLOIEMENT RÉUSSI SUR LE CLUSTER !'
+            echo "🌐 Image déployée : ${IMAGE_FULL_NAME}"
+        }
+        failure { 
+            echo '❌ ÉCHEC : Vérifie les logs'
+            sh "kubectl --insecure-skip-tls-verify=true get pods -n ${KUBE_NAMESPACE} || true"
+        }
         always {
+            // Nettoyage asynchrone pour ne pas ralentir
             sh "docker rmi ${IMAGE_FULL_NAME} || true"
+            cleanWs(deleteDirs: true, patterns: [[pattern: 'kubeconfig_tmp', type: 'INCLUDE']])
         }
     }
 }
