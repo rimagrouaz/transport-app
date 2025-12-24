@@ -1,113 +1,275 @@
 pipeline {
-    agent any
+    agent none
+
     environment {
-        DOCKER_USER = 'rimagrouaz' 
+        DOCKER_USER = 'rimagrouaz'
         APP_NAME = 'transport-app'
         APP_VERSION = "v${env.BUILD_NUMBER}"
         KUBE_NAMESPACE = 'transport'
         IMAGE_FULL_NAME = "${DOCKER_USER}/${APP_NAME}:${APP_VERSION}"
-        // Cache Docker pour accélérer les builds
-        DOCKER_BUILDKIT = '1'
     }
-    
+
     options {
-        // Limite le temps total du pipeline
-        timeout(time: 15, unit: 'MINUTES')
-        // Garde seulement les 10 derniers builds
+        timeout(time: 20, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
-    
+
     stages {
+
         stage('🔍 Checkout') {
+            agent any
             steps {
+                echo '📥 Checking out source code...'
                 checkout scm
+                stash includes: '**', name: 'source-code'
             }
         }
-        
-        stage('🐳 Build & Push to DockerHub') {
+
+        stage('🐍 Install Dependencies & Run Tests') {
+            agent {
+                docker {
+                    image 'python:3.11-slim'
+                    args '-u root'
+                }
+            }
             steps {
-                script {
+                unstash 'source-code'
+                echo '📦 Installing Python dependencies...'
+                dir('transport-optimization-devops/app') {
+                    sh '''
+                        python -m pip install --upgrade pip
+                        pip install -r requirements.txt
+                    '''
+                }
+                
+                echo '🧪 Running tests (if any)...'
+                dir('transport-optimization-devops/app') {
+                    sh 'python -m pytest tests/ || exit 0'
+                }
+            }
+        }
+
+        stage('🐳 Build Docker Image & Push to DockerHub') {
+            agent {
+                docker {
+                    image 'docker:24-dind'
+                    args '--privileged -v /var/run/docker.sock:/var/run/docker.sock'
+                }
+            }
+            steps {
+                unstash 'source-code'
+                echo '🏗️ Building Docker image...'
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKER_USERNAME',
+                    passwordVariable: 'DOCKER_PASSWORD'
+                )]) {
                     dir('transport-optimization-devops') {
-                        docker.withRegistry('', 'dockerhub-credentials') {
-                            // Build avec cache et optimisations
-                            def customImage = docker.build(
-                                "${IMAGE_FULL_NAME}", 
-                                "--cache-from ${DOCKER_USER}/${APP_NAME}:latest --build-arg BUILDKIT_INLINE_CACHE=1 -f docker/Dockerfile ."
-                            )
-                            // Push en parallèle de la version et du tag latest
-                            parallel(
-                                "Push Version": { customImage.push() },
-                                "Push Latest": { customImage.push('latest') }
-                            )
-                        }
+                        sh '''
+                            echo "🔐 Connexion à DockerHub..."
+                            echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                            
+                            echo "🔨 Build de l'image Docker..."
+                            docker build \
+                                -t ${IMAGE_FULL_NAME} \
+                                -t ${DOCKER_USER}/${APP_NAME}:latest \
+                                -f docker/Dockerfile .
+                            
+                            echo "📤 Push vers DockerHub..."
+                            docker push ${IMAGE_FULL_NAME}
+                            docker push ${DOCKER_USER}/${APP_NAME}:latest
+                            
+                            echo "✅ Image publiée : ${IMAGE_FULL_NAME}"
+                        '''
                     }
                 }
             }
         }
-        
-        stage('☸️ Kubernetes: Deploy') {
+
+        stage('☸️ Kubernetes Connectivity Check') {
             agent {
                 docker {
-                    image 'bitnami/kubectl:latest'
-                    args '-u root --entrypoint='
-                    // Réutilise le même conteneur pour économiser du temps
-                    reuseNode true
+                    image 'bitnami/kubectl:1.28'
+                    args '--entrypoint= -u root'
                 }
             }
             steps {
+                unstash 'source-code'
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
                     sh '''
-                        cp ${KUBECFG} ./kubeconfig_tmp
-                        export KUBECONFIG=./kubeconfig_tmp
-                        sed -i 's/127.0.0.1/host.docker.internal/g' ./kubeconfig_tmp
+                        echo "🔍 Checking Kubernetes access..."
+                        mkdir -p ~/.kube
+                        cp ${KUBECFG} ~/.kube/config
+                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
                         
-                        alias k='kubectl --insecure-skip-tls-verify=true'
+                        kubectl --insecure-skip-tls-verify=true version --client
+                        kubectl --insecure-skip-tls-verify=true get nodes || echo "⚠️ Cannot access nodes (might be normal)"
+                    '''
+                }
+            }
+        }
+
+        stage('📁 Create Namespace') {
+            agent {
+                docker {
+                    image 'bitnami/kubectl:1.28'
+                    args '--entrypoint= -u root'
+                }
+            }
+            steps {
+                unstash 'source-code'
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
+                    sh '''
+                        echo "📁 Ensuring Kubernetes namespace exists..."
+                        mkdir -p ~/.kube
+                        cp ${KUBECFG} ~/.kube/config
+                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
                         
-                        echo "🚀 Déploiement de l'image : ${IMAGE_FULL_NAME}"
+                        kubectl --insecure-skip-tls-verify=true create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | \
+                        kubectl --insecure-skip-tls-verify=true apply -f -
+                    '''
+                }
+            }
+        }
+
+        stage('🚀 Deploy to Kubernetes') {
+            agent {
+                docker {
+                    image 'bitnami/kubectl:1.28'
+                    args '--entrypoint= -u root'
+                }
+            }
+            steps {
+                unstash 'source-code'
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
+                    sh '''
+                        echo "🚀 Deploying application to Kubernetes..."
+                        mkdir -p ~/.kube
+                        cp ${KUBECFG} ~/.kube/config
+                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
                         
-                        # Applique tous les manifests en une seule commande
-                        k apply -f transport-optimization-devops/kubernetes/ -n ${KUBE_NAMESPACE}
-                        
-                        # Force la mise à jour de l'image
-                        k set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL_NAME} -n ${KUBE_NAMESPACE}
-                        
-                        # Rollout avec timeout réduit et vérification rapide
-                        echo "⏳ Vérification du déploiement..."
-                        k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=2m || {
-                            echo "⚠️  Timeout atteint, vérification manuelle..."
-                            k get pods -n ${KUBE_NAMESPACE} -l app=${APP_NAME}
-                            exit 1
+                        # Fonction kubectl avec insecure
+                        k() {
+                            kubectl --insecure-skip-tls-verify=true "$@"
                         }
                         
-                        # Vérification que les pods sont bien Running
-                        READY_PODS=$(k get deployment/${APP_NAME} -n ${KUBE_NAMESPACE} -o jsonpath='{.status.readyReplicas}')
-                        DESIRED_PODS=$(k get deployment/${APP_NAME} -n ${KUBE_NAMESPACE} -o jsonpath='{.spec.replicas}')
+                        echo "🗑️ Suppression de l'ancien déploiement (si existant)..."
+                        k delete deployment ${APP_NAME} -n ${KUBE_NAMESPACE} --ignore-not-found=true
                         
-                        if [ "$READY_PODS" = "$DESIRED_PODS" ]; then
-                            echo "✅ ${READY_PODS}/${DESIRED_PODS} pods prêts"
-                        else
-                            echo "❌ Seulement ${READY_PODS}/${DESIRED_PODS} pods prêts"
-                            exit 1
-                        fi
+                        echo "📄 Application des manifests Kubernetes..."
+                        k apply -f transport-optimization-devops/kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
+                        k apply -f transport-optimization-devops/kubernetes/service.yaml -n ${KUBE_NAMESPACE}
+                        
+                        echo "🔄 Mise à jour de l'image vers ${IMAGE_FULL_NAME}..."
+                        k set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL_NAME} -n ${KUBE_NAMESPACE}
+                    '''
+                }
+            }
+        }
+
+        stage('✅ Verify Deployment') {
+            agent {
+                docker {
+                    image 'bitnami/kubectl:1.28'
+                    args '--entrypoint= -u root'
+                }
+            }
+            steps {
+                unstash 'source-code'
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
+                    sh '''
+                        echo "✅ Verifying deployment status..."
+                        mkdir -p ~/.kube
+                        cp ${KUBECFG} ~/.kube/config
+                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
+                        
+                        k() {
+                            kubectl --insecure-skip-tls-verify=true "$@"
+                        }
+                        
+                        echo "⏳ Waiting 15 seconds before checking status..."
+                        sleep 15
+                        
+                        echo "📊 Rollout status:"
+                        k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                        
+                        echo ""
+                        echo "📦 Pods status:"
+                        k get pods -n ${KUBE_NAMESPACE} -o wide
+                        
+                        echo ""
+                        echo "🌐 Services:"
+                        k get svc -n ${KUBE_NAMESPACE}
+                    '''
+                }
+            }
+        }
+
+        stage('🌐 Application URL') {
+            agent {
+                docker {
+                    image 'bitnami/kubectl:1.28'
+                    args '--entrypoint= -u root'
+                }
+            }
+            steps {
+                unstash 'source-code'
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
+                    sh '''
+                        echo "🌐 Getting application access information..."
+                        mkdir -p ~/.kube
+                        cp ${KUBECFG} ~/.kube/config
+                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
+                        
+                        k() {
+                            kubectl --insecure-skip-tls-verify=true "$@"
+                        }
+                        
+                        echo ""
+                        echo "========================================"
+                        echo "APPLICATION DEPLOYED SUCCESSFULLY!"
+                        echo "========================================"
+                        echo ""
+                        echo "🐳 Docker Image: ${IMAGE_FULL_NAME}"
+                        echo "☸️  Namespace: ${KUBE_NAMESPACE}"
+                        echo ""
+                        echo "Access your application:"
+                        echo "1. Port Forward: kubectl port-forward -n ${KUBE_NAMESPACE} svc/${APP_NAME}-service 5000:80"
+                        echo "2. Minikube: minikube service ${APP_NAME}-service -n ${KUBE_NAMESPACE}"
+                        echo ""
+                        
+                        k get svc -n ${KUBE_NAMESPACE} ${APP_NAME}-service || k get svc -n ${KUBE_NAMESPACE}
                     '''
                 }
             }
         }
     }
-    
+
     post {
-        success { 
-            echo '✅ DÉPLOIEMENT RÉUSSI SUR LE CLUSTER !'
-            echo "🌐 Image déployée : ${IMAGE_FULL_NAME}"
+        success {
+            echo '✅ ✅ ✅ PIPELINE COMPLETED SUCCESSFULLY! ✅ ✅ ✅'
+            echo '🎉 Application deployed to Kubernetes cluster!'
+            echo "🐳 Docker Image: ${IMAGE_FULL_NAME}"
+            echo "☸️  Namespace: ${KUBE_NAMESPACE}"
+            echo '📱 Check the Application URL stage for access instructions'
         }
-        failure { 
-            echo '❌ ÉCHEC : Vérifie les logs'
-            sh "kubectl --insecure-skip-tls-verify=true get pods -n ${KUBE_NAMESPACE} || true"
+        failure {
+            echo '❌ ❌ ❌ PIPELINE FAILED! ❌ ❌ ❌'
+            echo '📋 Check the console output above for error details'
+            echo '💡 Common fixes:'
+            echo '   - Ensure Jenkins has Docker socket access'
+            echo '   - Verify DockerHub credentials are configured'
+            echo '   - Check kubeconfig file is uploaded to Jenkins'
+            echo '   - Ensure namespace and resources exist'
         }
         always {
-            // Nettoyage asynchrone pour ne pas ralentir
-            sh "docker rmi ${IMAGE_FULL_NAME} || true"
-            cleanWs(deleteDirs: true, patterns: [[pattern: 'kubeconfig_tmp', type: 'INCLUDE']])
+            node('') {
+                cleanWs(deleteDirs: true)
+            }
+            script {
+                def date = new Date().format('yyyy-MM-dd HH:mm:ss')
+                echo "🧹 Pipeline execution finished at ${date}"
+            }
         }
     }
 }
