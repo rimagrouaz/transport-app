@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         APP_NAME = 'transport-app'
-        APP_VERSION = 'v1'
+        APP_VERSION = 'v2'
         KUBE_NAMESPACE = 'transport'
     }
 
