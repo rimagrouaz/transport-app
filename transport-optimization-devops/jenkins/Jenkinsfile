@@ -1,241 +1,106 @@
 pipeline {
-    agent none
+    agent any
 
     environment {
-        DOCKER_USER = 'rimagrouaz'
         APP_NAME = 'transport-app'
-        APP_VERSION = "v${env.BUILD_NUMBER}"
+        APP_VERSION = 'v2'
         KUBE_NAMESPACE = 'transport'
-        IMAGE_FULL_NAME = "${DOCKER_USER}/${APP_NAME}:${APP_VERSION}"
-    }
-
-    options {
-        timeout(time: 20, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     stages {
 
         stage('🔍 Checkout') {
-            agent any
             steps {
                 echo '📥 Checking out source code...'
                 checkout scm
-                stash includes: '**', name: 'source-code'
             }
         }
 
-        stage('🐍 Install Dependencies & Run Tests') {
-            agent {
-                docker {
-                    image 'python:3.11-slim'
-                    args '-u root'
-                }
-            }
+        stage('🐍 Install Dependencies') {
             steps {
-                unstash 'source-code'
                 echo '📦 Installing Python dependencies...'
                 dir('transport-optimization-devops/app') {
-                    sh '''
+                    bat '''
                         python -m pip install --upgrade pip
                         pip install -r requirements.txt
                     '''
                 }
-                
+            }
+        }
+
+        stage('🧪 Run Tests') {
+            steps {
                 echo '🧪 Running tests (if any)...'
                 dir('transport-optimization-devops/app') {
-                    sh 'python -m pytest tests/ || exit 0'
+                    bat 'python -m pytest tests/ || exit /b 0'
                 }
             }
         }
 
-        stage('🐳 Build Docker Image & Push to DockerHub') {
-            agent any
+        stage('🐳 Build Docker Image (Local)') {
             steps {
-                unstash 'source-code'
-                echo '🏗️ Building Docker image...'
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-credentials',
-                    usernameVariable: 'DOCKER_USERNAME',
-                    passwordVariable: 'DOCKER_PASSWORD'
-                )]) {
-                    dir('transport-optimization-devops') {
-                        sh '''
-                            echo "🔐 Connexion à DockerHub..."
-                            echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
-                            
-                            echo "🔨 Build de l'image Docker..."
-                            docker build \
-                                -t ${IMAGE_FULL_NAME} \
-                                -t ${DOCKER_USER}/${APP_NAME}:latest \
-                                -f docker/Dockerfile .
-                            
-                            echo "📤 Push vers DockerHub..."
-                            docker push ${IMAGE_FULL_NAME}
-                            docker push ${DOCKER_USER}/${APP_NAME}:latest
-                            
-                            echo "✅ Image publiée : ${IMAGE_FULL_NAME}"
-                        '''
-                    }
+                echo '🏗️ Building Docker image locally...'
+                dir('transport-optimization-devops') {
+                    bat 'docker build -t %APP_NAME%:%APP_VERSION% -f docker/Dockerfile .'
                 }
             }
         }
 
         stage('☸️ Kubernetes Connectivity Check') {
-            agent {
-                docker {
-                    image 'bitnami/kubectl:1.28'
-                    args '--entrypoint= -u root'
-                }
-            }
             steps {
-                unstash 'source-code'
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
-                    sh '''
-                        echo "🔍 Checking Kubernetes access..."
-                        mkdir -p ~/.kube
-                        cp ${KUBECFG} ~/.kube/config
-                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
-                        
-                        kubectl --insecure-skip-tls-verify=true version --client
-                        kubectl --insecure-skip-tls-verify=true get nodes || echo "⚠️ Cannot access nodes (might be normal)"
-                    '''
-                }
+                echo '🔍 Checking Kubernetes access...'
+                bat '''
+                    kubectl version --client
+                    kubectl get nodes
+                '''
             }
         }
 
         stage('📁 Create Namespace') {
-            agent {
-                docker {
-                    image 'bitnami/kubectl:1.28'
-                    args '--entrypoint= -u root'
-                }
-            }
             steps {
-                unstash 'source-code'
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
-                    sh '''
-                        echo "📁 Ensuring Kubernetes namespace exists..."
-                        mkdir -p ~/.kube
-                        cp ${KUBECFG} ~/.kube/config
-                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
-                        
-                        kubectl --insecure-skip-tls-verify=true create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | \
-                        kubectl --insecure-skip-tls-verify=true apply -f -
-                    '''
-                }
+                echo '📁 Ensuring Kubernetes namespace exists...'
+                bat 'kubectl create namespace %KUBE_NAMESPACE% --dry-run=client -o yaml | kubectl apply -f -'
             }
         }
 
         stage('🚀 Deploy to Kubernetes') {
-            agent {
-                docker {
-                    image 'bitnami/kubectl:1.28'
-                    args '--entrypoint= -u root'
-                }
-            }
             steps {
-                unstash 'source-code'
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
-                    sh '''
-                        echo "🚀 Deploying application to Kubernetes..."
-                        mkdir -p ~/.kube
-                        cp ${KUBECFG} ~/.kube/config
-                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
-                        
-                        # Fonction kubectl avec insecure
-                        k() {
-                            kubectl --insecure-skip-tls-verify=true "$@"
-                        }
-                        
-                        echo "🗑️ Suppression de l'ancien déploiement (si existant)..."
-                        k delete deployment ${APP_NAME} -n ${KUBE_NAMESPACE} --ignore-not-found=true
-                        
-                        echo "📄 Application des manifests Kubernetes..."
-                        k apply -f transport-optimization-devops/kubernetes/deployment.yaml -n ${KUBE_NAMESPACE}
-                        k apply -f transport-optimization-devops/kubernetes/service.yaml -n ${KUBE_NAMESPACE}
-                        
-                        echo "🔄 Mise à jour de l'image vers ${IMAGE_FULL_NAME}..."
-                        k set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL_NAME} -n ${KUBE_NAMESPACE}
-                    '''
-                }
+                echo '🚀 Deploying application to Kubernetes...'
+                bat '''
+                    kubectl delete deployment %APP_NAME% -n %KUBE_NAMESPACE% --ignore-not-found=true
+                    kubectl apply -f kubernetes/deployment.yaml -n %KUBE_NAMESPACE%
+                    kubectl apply -f kubernetes/service.yaml -n %KUBE_NAMESPACE%
+                '''
             }
         }
 
         stage('✅ Verify Deployment') {
-            agent {
-                docker {
-                    image 'bitnami/kubectl:1.28'
-                    args '--entrypoint= -u root'
-                }
-            }
             steps {
-                unstash 'source-code'
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
-                    sh '''
-                        echo "✅ Verifying deployment status..."
-                        mkdir -p ~/.kube
-                        cp ${KUBECFG} ~/.kube/config
-                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
-                        
-                        k() {
-                            kubectl --insecure-skip-tls-verify=true "$@"
-                        }
-                        
-                        echo "⏳ Waiting 15 seconds before checking status..."
-                        sleep 15
-                        
-                        echo "📊 Rollout status:"
-                        k rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
-                        
-                        echo ""
-                        echo "📦 Pods status:"
-                        k get pods -n ${KUBE_NAMESPACE} -o wide
-                        
-                        echo ""
-                        echo "🌐 Services:"
-                        k get svc -n ${KUBE_NAMESPACE}
-                    '''
-                }
+                echo '✅ Verifying deployment status...'
+                bat '''
+                    timeout /t 15
+                    kubectl rollout status deployment/%APP_NAME% -n %KUBE_NAMESPACE% --timeout=3m
+                    kubectl get pods -n %KUBE_NAMESPACE% -o wide
+                    kubectl get svc -n %KUBE_NAMESPACE%
+                '''
             }
         }
 
         stage('🌐 Application URL') {
-            agent {
-                docker {
-                    image 'bitnami/kubectl:1.28'
-                    args '--entrypoint= -u root'
-                }
-            }
             steps {
-                unstash 'source-code'
-                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
-                    sh '''
-                        echo "🌐 Getting application access information..."
-                        mkdir -p ~/.kube
-                        cp ${KUBECFG} ~/.kube/config
-                        sed -i 's/127.0.0.1/host.docker.internal/g' ~/.kube/config
-                        
-                        k() {
-                            kubectl --insecure-skip-tls-verify=true "$@"
-                        }
-                        
-                        echo ""
-                        echo "========================================"
-                        echo "APPLICATION DEPLOYED SUCCESSFULLY!"
-                        echo "========================================"
-                        echo ""
-                        echo "🐳 Docker Image: ${IMAGE_FULL_NAME}"
-                        echo "☸️  Namespace: ${KUBE_NAMESPACE}"
-                        echo ""
-                        echo "Access your application:"
-                        echo "1. Port Forward: kubectl port-forward -n ${KUBE_NAMESPACE} svc/${APP_NAME}-service 5000:80"
-                        echo "2. Minikube: minikube service ${APP_NAME}-service -n ${KUBE_NAMESPACE}"
-                        echo ""
-                        
-                        k get svc -n ${KUBE_NAMESPACE} ${APP_NAME}-service || k get svc -n ${KUBE_NAMESPACE}
-                    '''
-                }
+                echo '🌐 Getting application access information...'
+                bat '''
+                    echo.
+                    echo ========================================
+                    echo APPLICATION DEPLOYED SUCCESSFULLY!
+                    echo ========================================
+                    echo.
+                    echo Access your application:
+                    echo 1. Port Forward: kubectl port-forward -n %KUBE_NAMESPACE% svc/%APP_NAME%-service 5000:80
+                    echo 2. Minikube: minikube service %APP_NAME%-service -n %KUBE_NAMESPACE%
+                    echo.
+                    kubectl get svc -n %KUBE_NAMESPACE% %APP_NAME%-service
+                '''
             }
         }
     }
@@ -244,27 +109,18 @@ pipeline {
         success {
             echo '✅ ✅ ✅ PIPELINE COMPLETED SUCCESSFULLY! ✅ ✅ ✅'
             echo '🎉 Application deployed to Kubernetes cluster!'
-            echo "🐳 Docker Image: ${IMAGE_FULL_NAME}"
-            echo "☸️  Namespace: ${KUBE_NAMESPACE}"
             echo '📱 Check the Application URL stage for access instructions'
         }
         failure {
             echo '❌ ❌ ❌ PIPELINE FAILED! ❌ ❌ ❌'
             echo '📋 Check the console output above for error details'
             echo '💡 Common fixes:'
-            echo '   - Ensure Jenkins has Docker socket access'
-            echo '   - Verify DockerHub credentials are configured'
-            echo '   - Check kubeconfig file is uploaded to Jenkins'
-            echo '   - Ensure namespace and resources exist'
+            echo '   - Ensure kubectl can access the cluster'
+            echo '   - Check Docker daemon is running'
+            echo '   - Verify namespace and resources exist'
         }
         always {
-            node('') {
-                cleanWs(deleteDirs: true)
-            }
-            script {
-                def date = new Date().format('yyyy-MM-dd HH:mm:ss')
-                echo "🧹 Pipeline execution finished at ${date}"
-            }
+            echo '🧹 Pipeline execution finished at ' + new Date().format('yyyy-MM-dd HH:mm:ss')
         }
     }
 }
