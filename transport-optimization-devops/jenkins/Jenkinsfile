@@ -22,8 +22,8 @@ pipeline {
                 dir('transport-optimization-devops/app') {
                     // Utilisation de sh et python3/pip3 (standard Linux)
                     sh '''
-                        python3 -m pip install --upgrade pip
-                        pip3 install -r requirements.txt
+                        python3 -m pip install --break-system-packages --upgrade pip
+                        pip3 install --break-system-packages -r requirements.txt
                     '''
                 }
             }
