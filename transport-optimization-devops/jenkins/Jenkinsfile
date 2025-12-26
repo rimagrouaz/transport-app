@@ -82,7 +82,7 @@ pipeline {
                 echo '✅ Verifying deployment status...'
                 sh '''
                     sleep 15
-                    kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=3m
+                    kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE} --timeout=5m
                     kubectl get pods -n ${KUBE_NAMESPACE}
                 '''
             }
